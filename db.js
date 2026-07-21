@@ -1,0 +1,100 @@
+// lib/db.js
+// Database layer. Uses Node's built-in `node:sqlite` (stable since Node 22.5+,
+// available behind no flag on recent 22.x/23.x/24.x builds). Zero npm dependencies.
+//
+// If your deployment target runs an older Node, either upgrade to 22.5+
+// (recommended — it's an LTS line) or swap this file for `better-sqlite3`,
+// which has an almost identical synchronous API.
+
+const { DatabaseSync } = require("node:sqlite");
+const path = require("node:path");
+const crypto = require("node:crypto");
+
+const DB_PATH = process.env.DB_PATH || path.join(__dirname, "data", "anyvisa.db");
+const db = new DatabaseSync(DB_PATH);
+
+db.exec(`
+  CREATE TABLE IF NOT EXISTS users (
+    id TEXT PRIMARY KEY,
+    email TEXT UNIQUE NOT NULL,
+    password_hash TEXT NOT NULL,
+    password_salt TEXT NOT NULL,
+    role TEXT NOT NULL DEFAULT 'customer',   -- 'customer' | 'admin'
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  );
+
+  CREATE TABLE IF NOT EXISTS reset_codes (
+    email TEXT PRIMARY KEY,
+    code TEXT NOT NULL,
+    expires_at TEXT NOT NULL
+  );
+
+  CREATE TABLE IF NOT EXISTS countries (
+    id TEXT PRIMARY KEY,
+    name TEXT UNIQUE NOT NULL,
+    government_fee INTEGER NOT NULL,
+    service_fee INTEGER NOT NULL DEFAULT 69,
+    is_evisa INTEGER NOT NULL DEFAULT 0,      -- 0/1
+    note TEXT DEFAULT '',
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+  );
+
+  CREATE TABLE IF NOT EXISTS applications (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL,
+    country_id TEXT NOT NULL,
+    purpose TEXT NOT NULL,
+    travelers INTEGER NOT NULL DEFAULT 1,
+    status TEXT NOT NULL DEFAULT 'documents_needed',
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    FOREIGN KEY (user_id) REFERENCES users(id),
+    FOREIGN KEY (country_id) REFERENCES countries(id)
+  );
+
+  CREATE TABLE IF NOT EXISTS documents (
+    id TEXT PRIMARY KEY,
+    application_id TEXT NOT NULL,
+    doc_type TEXT NOT NULL,
+    file_path TEXT,
+    ai_status TEXT NOT NULL DEFAULT 'pending',   -- pending | passed | needs_review | failed
+    ai_reason TEXT DEFAULT '',
+    reviewed_by_human INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    FOREIGN KEY (application_id) REFERENCES applications(id)
+  );
+`);
+
+// ---- seed default countries (matches the current front-end demo data) ----
+const countrySeed = [
+  ["russia",       "Russia",        91,  69, 0, "Invitation arranged automatically if you don't have one."],
+  ["china",        "China",         151, 69, 0, "Biometrics slot pre-booked automatically."],
+  ["india",        "India",         127, 69, 1, "Tourist e-visa is filed fully online."],
+  ["usa",          "USA",           185, 69, 0, "Interview required; we prepare your DS-160 and book it."],
+  ["saudi-arabia", "Saudi Arabia",  118, 69, 1, "Tourist e-visa filed online; business via consulate."],
+  ["nigeria",      "Nigeria",       105, 69, 1, "Visa-on-arrival approval processed fully online."],
+  ["egypt",        "Egypt",         25,  69, 1, "E-visa filed fully online — typical decision in days."],
+  ["turkey",       "Turkey",        43,  69, 1, "E-visa for eligible nationalities."],
+  ["vietnam",      "Vietnam",       21,  69, 1, "E-visa filed fully online."],
+  ["kazakhstan",   "Kazakhstan",    0,   69, 0, "Visa-free up to 30 days for UK nationals."]
+];
+const seedStmt = db.prepare(
+  `INSERT OR IGNORE INTO countries (id, name, government_fee, service_fee, is_evisa, note) VALUES (?, ?, ?, ?, ?, ?)`
+);
+for (const row of countrySeed) seedStmt.run(...row);
+
+// ---- seed a default admin user (email/password from env, or a dev default) ----
+// IMPORTANT: change ADMIN_EMAIL / ADMIN_PASSWORD via environment variables in
+// production. The fallback below is for local development only.
+const { hashPassword } = require("./auth-core");
+const adminEmail = process.env.ADMIN_EMAIL || "admin@anyvisa.co.uk";
+const existingAdmin = db.prepare(`SELECT id FROM users WHERE email = ?`).get(adminEmail);
+if (!existingAdmin) {
+  const adminPassword = process.env.ADMIN_PASSWORD || "changeme-immediately";
+  const { hash, salt } = hashPassword(adminPassword);
+  db.prepare(
+    `INSERT INTO users (id, email, password_hash, password_salt, role) VALUES (?, ?, ?, ?, 'admin')`
+  ).run(crypto.randomUUID(), adminEmail, hash, salt);
+  console.log(`[db] Seeded admin user: ${adminEmail} (change ADMIN_PASSWORD env var in production!)`);
+}
+
+module.exports = db;
